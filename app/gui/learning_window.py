@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QLineEdit, QTextEdit, QTextBrowser,
     QTabWidget, QFileDialog, QMessageBox, QFrame, QProgressBar,
-    QCheckBox, QScrollArea, QSplitter, QSlider, QInputDialog, QListWidget, QListWidgetItem, QDialog
+    QCheckBox, QScrollArea, QSplitter, QSlider, QInputDialog, QListWidget, QListWidgetItem, QDialog, QApplication
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 
@@ -90,8 +90,8 @@ class LearningWindow(QMainWindow):
         self.storage = storage or Storage(get_db_path())
         self.settings = load_settings()
 
-        self.setWindowTitle("AVebiNa Learning — Live Meeting AI Companion & NotebookLM Studio")
-        self.resize(1300, 900)
+        self.setWindowTitle("AVebiNa Learning — Notion AI Meeting Notes & Live Audio Companion")
+        self.resize(1320, 920)
         self.setStyleSheet(DARK_THEME)
 
         self.recorder = AudioRecorder(on_level_update=self.on_audio_data_update)
@@ -115,7 +115,7 @@ class LearningWindow(QMainWindow):
         self.current_learning_data: Dict[str, Any] = {}
         self.notebook_sources: List[Dict[str, str]] = []
         self.record_seconds = 0
-        self.recording_target_mode = "Google Meet / Browser Audio (Audio Only)"
+        self.recording_target_mode = "Google Meet / Browser Audio"
         self.worker: Optional[QThread] = None
 
         self.record_timer = QTimer(self)
@@ -145,7 +145,7 @@ class LearningWindow(QMainWindow):
         self.playback_frame = self._create_playback_strip()
         main_layout.addWidget(self.playback_frame)
 
-        # 4. Main Notebook Splitter (NotebookLM Left Sources Drawer + Right Learning Workspace)
+        # 4. Main Notebook Splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(1)
 
@@ -153,11 +153,11 @@ class LearningWindow(QMainWindow):
         sources_pane = self._create_sources_pane()
         splitter.addWidget(sources_pane)
 
-        # Right: Notebook Workspace Tabs
+        # Right: Notion AI & NotebookLM Workspace Tabs
         workspace_pane = self._create_workspace_pane()
         splitter.addWidget(workspace_pane)
 
-        splitter.setSizes([260, 1020])
+        splitter.setSizes([260, 1040])
         main_layout.addWidget(splitter, 1)
 
     # ------------------ AI STATUS BANNER ------------------
@@ -176,7 +176,7 @@ class LearningWindow(QMainWindow):
         self.storage_path_lbl.setStyleSheet("color: #64748b; font-size: 12px;")
         layout.addWidget(self.storage_path_lbl)
 
-        open_folder_btn = QPushButton("Open Folder")
+        open_folder_btn = QPushButton("Open Recordings Folder")
         open_folder_btn.setProperty("class", "secondaryBtn")
         open_folder_btn.setStyleSheet("padding: 3px 10px; font-size: 11px;")
         open_folder_btn.clicked.connect(lambda: open_folder_in_file_manager(get_recordings_dir()))
@@ -197,7 +197,7 @@ class LearningWindow(QMainWindow):
             self.ai_status_lbl.setStyleSheet("color: #34d399; font-weight: bold; font-size: 12px;")
             self.config_ai_btn.setText("⚙ AI Settings")
         else:
-            self.ai_status_lbl.setText("⚠️ Free Gemini API Key required for live summarization")
+            self.ai_status_lbl.setText("⚠️ Free Gemini API Key required for live summarization & Notion AI notes")
             self.ai_status_lbl.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 12px;")
             self.config_ai_btn.setText("🔑 Enter Free API Key")
 
@@ -221,7 +221,6 @@ class LearningWindow(QMainWindow):
         refresh_dev_btn.clicked.connect(self.refresh_audio_devices)
         row1.addWidget(refresh_dev_btn)
 
-        # Target Window / Tab Selector Tool
         target_btn = QPushButton("🎛 Target Tab / Window")
         target_btn.setProperty("class", "secondaryBtn")
         target_btn.setToolTip("Select which window, browser tab, or application audio to capture")
@@ -255,6 +254,7 @@ class LearningWindow(QMainWindow):
         self.timer_lbl.setStyleSheet("font-family: monospace; font-size: 18px; font-weight: bold; color: #f3f4f6; padding: 0 8px;")
         row1.addWidget(self.timer_lbl)
 
+        # High-sensitivity Live Waveform Widget
         self.waveform_widget = WaveformWidget()
         row1.addWidget(self.waveform_widget, 1)
 
@@ -264,7 +264,7 @@ class LearningWindow(QMainWindow):
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("Session Topic:"))
         self.topic_input = QLineEdit()
-        self.topic_input.setPlaceholderText("e.g. Google Meet: Client Call / Lecture — Architecture & Scope Review")
+        self.topic_input.setPlaceholderText("e.g. Google Meet: Client Strategy Call / Class Lecture — Photosynthesis & Cellular Respiration")
         row2.addWidget(self.topic_input, 1)
 
         self.watch_video_btn = QPushButton("🎥 Watch Video / YouTube")
@@ -277,7 +277,7 @@ class LearningWindow(QMainWindow):
         import_btn.clicked.connect(self.import_audio_file)
         row2.addWidget(import_btn)
 
-        self.reprocess_btn = QPushButton("✨ Synthesize NotebookLM Study Guide")
+        self.reprocess_btn = QPushButton("✨ Generate Notion AI Meeting Notes")
         self.reprocess_btn.setStyleSheet("background-color: #2563eb; color: #ffffff; font-weight: bold; padding: 8px 16px; border-radius: 8px; border: none;")
         self.reprocess_btn.clicked.connect(self.trigger_ai_processing)
         self.reprocess_btn.setEnabled(False)
@@ -361,6 +361,12 @@ class LearningWindow(QMainWindow):
         action_strip.addWidget(self.status_label)
         action_strip.addStretch()
 
+        self.copy_notion_btn = QPushButton("📋 Copy as Notion Blocks")
+        self.copy_notion_btn.setStyleSheet("background-color: #2563eb; color: #ffffff; font-weight: bold; padding: 6px 12px; border-radius: 6px; border: none;")
+        self.copy_notion_btn.clicked.connect(self.copy_notion_blocks)
+        self.copy_notion_btn.setEnabled(False)
+        action_strip.addWidget(self.copy_notion_btn)
+
         self.save_sync_btn = QPushButton("☁ Save & Sync to CrossSync")
         self.save_sync_btn.setStyleSheet("background-color: #065f46; color: #34d399; font-weight: bold; padding: 6px 14px; border-radius: 6px; border: none;")
         self.save_sync_btn.clicked.connect(self.save_and_sync_all)
@@ -393,62 +399,72 @@ class LearningWindow(QMainWindow):
         # Tabs
         self.tabs = QTabWidget()
 
-        # Tab 1: Client-Ready Meeting Minutes & Brief (New!)
+        # Tab 1: Notion AI Meeting Notes (Primary Workspace)
+        self.notion_notes_browser = QTextBrowser()
+        self.notion_notes_browser.setObjectName("previewBrowser")
+        self.notion_notes_browser.setHtml(
+            f"<style>{get_markdown_css()}</style>"
+            "<h2>📝 Notion AI Live Meeting Take-Noter</h2>"
+            "<p>Automated Notion-style meeting notes with executive TL;DR, decision tracking, and action item tables.</p>"
+            "<ul>"
+            "<li><b>🎯 TL;DR Executive Summary:</b> High impact summary of what was covered.</li>"
+            "<li><b>📌 Decisions Made:</b> Formal log of agreed decisions.</li>"
+            "<li><b>⚡ Action Items Table:</b> Interactive checklist with Task, Owner, Deadline, and Priority.</li>"
+            "<li><b>💬 Discussion Topics:</b> Clean agenda segments attributed to each speaker.</li>"
+            "<li><b>📋 Copy as Notion Blocks:</b> Click to paste directly into Notion with native checkboxes and tables!</li>"
+            "</ul>"
+        )
+        self.tabs.addTab(self.notion_notes_browser, "📝 Notion AI Notes")
+
+        # Tab 2: Client-Ready Meeting Minutes & Brief
         self.client_minutes_browser = QTextBrowser()
         self.client_minutes_browser.setObjectName("previewBrowser")
         self.client_minutes_browser.setHtml(
             f"<style>{get_markdown_css()}</style>"
             "<h2>👔 Client-Ready Meeting Minutes</h2>"
-            "<p>Automatically identifies multiple speakers (Client vs You vs Presenter) and formats clean, formal meeting minutes ready to send to clients or executives.</p>"
+            "<p>Formal executive meeting minutes ready to send to clients, executives, or professors.</p>"
             "<ul>"
-            "<li><b>Speaker Diarization:</b> Auto-labels statements by speaker with timestamps.</li>"
+            "<li><b>Speaker Diarization:</b> Auto-labels statements by speaker (Client vs You) with timestamps.</li>"
             "<li><b>Deliverables Table:</b> Clear tasks, owners, and deadlines agreed upon in the meeting.</li>"
-            "<li><b>Decisions Summary:</b> Official summary of decisions made.</li>"
             "</ul>"
         )
         self.tabs.addTab(self.client_minutes_browser, "👔 Client Minutes & Brief")
 
-        # Tab 2: Study Notes & Summary
+        # Tab 3: Detailed Study Notes & Outline
         self.notes_browser = QTextBrowser()
         self.notes_browser.setObjectName("previewBrowser")
         self.notes_browser.setHtml(
             f"<style>{get_markdown_css()}</style>"
-            "<h2>Welcome to AVebiNa Learning & NotebookLM Studio</h2>"
-            "<p>Capture any lecture or Google Meeting live, or import video files to watch and summarize.</p>"
-            "<ul>"
-            "<li><b>Live Waveform:</b> Animated wave bar shows live vocal speech frequencies in real time.</li>"
-            "<li><b>Google Meet Audio:</b> Select <i>[System / Meeting Audio]</i> to capture participant audio directly.</li>"
-            "<li><b>NotebookLM Two-Host Podcast:</b> Generates engaging conversational Audio Overview dialogues.</li>"
-            "<li><b>Watch & Summarize:</b> Processes video files (.mp4) and YouTube links.</li>"
-            "</ul>"
+            "<h2>Comprehensive Study Notes</h2>"
+            "<p>Detailed lecture outline, concepts, formulas, and explanations will appear here after recording.</p>"
         )
-        self.tabs.addTab(self.notes_browser, "📝 Study Notes & Summary")
+        self.tabs.addTab(self.notes_browser, "📖 Study Notes & Outline")
 
-        # Tab 3: NotebookLM Two-Host Deep Dive Podcast
+        # Tab 4: NotebookLM Two-Host Deep Dive Podcast
         self.podcast_widget = PodcastWidget()
         self.tabs.addTab(self.podcast_widget, "🎙 Deep Dive Podcast (Audio Overview)")
 
-        # Tab 4: Interactive Flashcards
+        # Tab 5: Interactive Flashcards
         self.flashcard_widget = FlashcardWidget()
         self.tabs.addTab(self.flashcard_widget, "📇 Flashcards (Active Recall)")
 
-        # Tab 5: Knowledge Check Quiz
+        # Tab 6: Knowledge Check Quiz
         self.quiz_widget = QuizWidget()
         self.tabs.addTab(self.quiz_widget, "❓ Quiz & Knowledge Check")
 
-        # Tab 6: Action Items & Homework
+        # Tab 7: Action Items & Homework
         self.tasks_tab = self._create_tasks_tab()
         self.tabs.addTab(self.tasks_tab, "📋 Action Items & Homework")
 
-        # Tab 7: Diarized Speaker Transcript
+        # Tab 8: Diarized Speaker Transcript
         self.transcript_browser = QTextBrowser()
         self.transcript_browser.setObjectName("previewBrowser")
         self.transcript_browser.setPlaceholderText("Speaker-identified transcript with timestamps will appear here after recording...")
         self.tabs.addTab(self.transcript_browser, "📜 Diarized Transcript")
 
-        # Tab 8: Grounded NotebookLM Chat
+        # Tab 9: Grounded NotebookLM Chat
         self.tutor_tab = self._create_tutor_tab()
-        self.tabs.addTab(self.tutor_tab, "💬 Grounded NotebookLM Chat")
+        self.tabs.addTab(self.tutor_tab, "💬 Grounded AI Chat")
 
         layout.addWidget(self.tabs, 1)
         return pane
@@ -481,7 +497,7 @@ class LearningWindow(QMainWindow):
         self.tutor_history.setObjectName("previewBrowser")
         self.tutor_history.setHtml(
             f"<style>{get_markdown_css()}</style>"
-            "<p><b>NotebookLM Grounded Chat ready!</b> Ask any question about your recorded meeting, video, or lecture sources. Responses include citations.</p>"
+            "<p><b>Notion AI & NotebookLM Chat ready!</b> Ask any question about your recorded meeting, video, or lecture sources. Responses include citations.</p>"
         )
         layout.addWidget(self.tutor_history, 1)
 
@@ -528,7 +544,6 @@ class LearningWindow(QMainWindow):
         for t in targets:
             target_combo.addItem(t)
         
-        # Select current
         for i, t in enumerate(targets):
             if self.recording_target_mode in t:
                 target_combo.setCurrentIndex(i)
@@ -657,7 +672,7 @@ class LearningWindow(QMainWindow):
 
             if saved_path:
                 self.add_source_to_drawer("🎙 Live Meeting Audio", Path(saved_path).name, saved_path)
-                self.status_label.setText(f"Saved: {Path(saved_path).name}. Synthesizing NotebookLM study guide...")
+                self.status_label.setText(f"Saved: {Path(saved_path).name}. Synthesizing Notion AI meeting notes...")
                 self.load_audio_into_player(saved_path)
                 self.trigger_ai_processing()
             else:
@@ -736,10 +751,10 @@ class LearningWindow(QMainWindow):
             try:
                 with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                     content = f.read()
-                current_text = self.notes_browser.toPlainText()
+                current_text = self.notion_notes_browser.toPlainText()
                 new_context = f"{current_text}\n\n# Document Source: {Path(file_path).name}\n\n{content}"
                 styled_html = f"<style>{get_markdown_css()}</style>{markdown.markdown(new_context)}"
-                self.notes_browser.setHtml(styled_html)
+                self.notion_notes_browser.setHtml(styled_html)
                 QMessageBox.information(self, "Document Added", f"Added '{Path(file_path).name}' as a grounded source!")
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Could not read document: {e}")
@@ -794,7 +809,7 @@ class LearningWindow(QMainWindow):
             return
 
         topic = self.topic_input.text().strip()
-        self.status_label.setText("🤖 Detecting speakers & synthesizing client-ready notes...")
+        self.status_label.setText("🤖 Detecting speakers & synthesizing Notion AI meeting notes...")
         self.status_label.setStyleSheet("color: #38bdf8; font-weight: bold;")
         self.reprocess_btn.setEnabled(False)
 
@@ -806,50 +821,56 @@ class LearningWindow(QMainWindow):
     def on_processing_finished(self, data: dict):
         self.reprocess_btn.setEnabled(True)
         self.save_sync_btn.setEnabled(True)
+        self.copy_notion_btn.setEnabled(True)
         self.export_anki_btn.setEnabled(True)
         self.export_html_btn.setEnabled(True)
         self.export_md_btn.setEnabled(True)
         self.current_learning_data = data
 
-        self.status_label.setText("✓ Speaker Diarization & Client Minutes Synthesized Successfully!")
+        self.status_label.setText("✓ Notion AI Meeting Notes & Speaker Diarization Generated!")
         self.status_label.setStyleSheet("color: #34d399; font-weight: bold;")
 
-        title = data.get("title", "Lecture Study Guide")
+        title = data.get("title", "Meeting Notes")
         if not self.topic_input.text():
             self.topic_input.setText(title)
 
-        # 1. Render Client-Ready Minutes Tab
+        # 1. Render Notion AI Notes Tab (Primary)
+        notion_notes = data.get("notion_meeting_notes", "")
+        if notion_notes:
+            html_notion = markdown.markdown(notion_notes, extensions=['fenced_code', 'tables'])
+            self.notion_notes_browser.setHtml(f"<style>{get_markdown_css()}</style>{html_notion}")
+        else:
+            self.notion_notes_browser.setHtml(f"<style>{get_markdown_css()}</style><p>Notion notes not generated.</p>")
+
+        # 2. Render Client-Ready Minutes Tab
         client_minutes = data.get("client_minutes", "")
         if client_minutes:
             html_client = markdown.markdown(client_minutes, extensions=['fenced_code', 'tables'])
             self.client_minutes_browser.setHtml(f"<style>{get_markdown_css()}</style>{html_client}")
-        else:
-            self.client_minutes_browser.setHtml(f"<style>{get_markdown_css()}</style><p>Client minutes not generated.</p>")
 
-        # 2. Render Study Notes Tab
+        # 3. Render Study Notes Tab
         summary = data.get("summary", "")
         study_notes = data.get("study_notes", "")
         full_md = f"# {title}\n\n## Executive Summary\n{summary}\n\n{study_notes}"
         html = markdown.markdown(full_md, extensions=['fenced_code', 'tables'])
-        styled_html = f"<style>{get_markdown_css()}</style>{html}"
-        self.notes_browser.setHtml(styled_html)
+        self.notes_browser.setHtml(f"<style>{get_markdown_css()}</style>{html}")
 
-        # 3. Render NotebookLM Two-Host Podcast Tab
+        # 4. Render NotebookLM Two-Host Podcast Tab
         podcast = data.get("deep_dive_podcast", [])
         self.podcast_widget.load_podcast(podcast)
 
-        # 4. Render Flashcards
+        # 5. Render Flashcards
         flashcards = data.get("flashcards", [])
         self.flashcard_widget.load_cards(flashcards)
 
-        # 5. Render Quiz
+        # 6. Render Quiz
         quiz = data.get("quiz", [])
         self.quiz_widget.load_quiz(quiz)
 
-        # 6. Render Action Items
+        # 7. Render Action Items
         self._populate_tasks(data.get("action_items", []))
 
-        # 7. Render Transcript with Speaker Labels
+        # 8. Render Transcript with Speaker Labels
         transcript = data.get("transcript", "No transcript available.")
         self.transcript_browser.setPlainText(transcript)
 
@@ -895,13 +916,26 @@ class LearningWindow(QMainWindow):
 
             self.tasks_layout.insertWidget(self.tasks_layout.count() - 1, task_box)
 
-    # ------------------ NOTEBOOKLM GROUNDED CHAT ------------------
+    # ------------------ NOTION COPY & EXPORT ------------------
+    def copy_notion_blocks(self):
+        notion_text = self.current_learning_data.get("notion_meeting_notes") or self.notion_notes_browser.toPlainText()
+        if notion_text:
+            QApplication.clipboard().setText(notion_text)
+            self.status_label.setText("✓ Copied Notion blocks! Press Ctrl+V in Notion to paste native blocks.")
+            QMessageBox.information(
+                self,
+                "Copied to Clipboard",
+                "✓ Formatted Notion blocks copied to clipboard!\n\n"
+                "Open any Notion page and press Ctrl+V to paste native Notion checkboxes, callout blocks, and tables."
+            )
+
+    # ------------------ GROUNDED CHAT ------------------
     def ask_tutor(self):
         question = self.tutor_input.text().strip()
         if not question:
             return
 
-        context = self.current_learning_data.get("study_notes") or self.notes_browser.toPlainText()
+        context = self.current_learning_data.get("notion_meeting_notes") or self.notion_notes_browser.toPlainText()
         self.tutor_input.clear()
 
         user_block = f"<p style='color: #60a5fa;'><b>You:</b> {question}</p><p style='color: #94a3b8;'><i>Searching sources...</i></p>"
@@ -923,18 +957,17 @@ class LearningWindow(QMainWindow):
             return
 
         title = self.current_learning_data.get("title") or self.topic_input.text() or "Meeting Notes"
+        notion_notes = self.current_learning_data.get("notion_meeting_notes", "")
         summary = self.current_learning_data.get("summary", "")
-        study_notes = self.current_learning_data.get("study_notes", "")
-        client_minutes = self.current_learning_data.get("client_minutes", "")
         transcript = self.current_learning_data.get("transcript", "")
 
-        full_content = f"{summary}\n\n{client_minutes}\n\n{study_notes}\n\n## Transcript Snippet\n{transcript[:1500]}"
+        full_content = f"{summary}\n\n{notion_notes}\n\n## Transcript Snippet\n{transcript[:1500]}"
 
         note_item = Item(
             item_type="note",
             title=title,
             content=full_content,
-            tags="meeting, client-minutes, diarization",
+            tags="meeting, notion-ai, diarization",
             is_pinned=True
         )
         self.storage.save_item(note_item, mark_dirty=True)
@@ -946,7 +979,7 @@ class LearningWindow(QMainWindow):
                     item_type="task",
                     title=task_title,
                     status="pending",
-                    tags="deliverables, homework"
+                    tags="action-items, notion"
                 )
                 self.storage.save_item(task_item, mark_dirty=True)
 
@@ -998,19 +1031,17 @@ class LearningWindow(QMainWindow):
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Export Printable Study Guide",
-            f"{self.topic_input.text() or 'study_guide'}.html",
+            f"{self.topic_input.text() or 'notion_notes'}.html",
             "HTML Files (*.html);;All Files (*)"
         )
         if file_path:
-            title = self.current_learning_data.get("title", "Study Guide")
-            summary = self.current_learning_data.get("summary", "")
-            client_minutes = self.current_learning_data.get("client_minutes", "")
-            notes = self.current_learning_data.get("study_notes", "")
+            title = self.current_learning_data.get("title", "Meeting Notes")
+            notion_notes = self.current_learning_data.get("notion_meeting_notes", "")
             podcast = self.current_learning_data.get("deep_dive_podcast", [])
             flashcards = self.current_learning_data.get("flashcards", [])
             quiz = self.current_learning_data.get("quiz", [])
 
-            notes_html = markdown.markdown(f"## Summary\n{summary}\n\n{client_minutes}\n\n{notes}")
+            notes_html = markdown.markdown(notion_notes)
 
             podcast_html = "".join([
                 f"<div class='podcast-turn'><b>{t.get('speaker','')}:</b> {t.get('text','')}</div>"
@@ -1064,26 +1095,22 @@ class LearningWindow(QMainWindow):
             return
         file_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Export Study Notes",
-            f"{self.topic_input.text() or 'lecture_notes'}.md",
+            "Export Notion Meeting Notes",
+            f"{self.topic_input.text() or 'notion_meeting_notes'}.md",
             "Markdown Files (*.md);;All Files (*)"
         )
         if file_path:
-            title = self.current_learning_data.get("title", "")
-            summary = self.current_learning_data.get("summary", "")
-            client_minutes = self.current_learning_data.get("client_minutes", "")
-            notes = self.current_learning_data.get("study_notes", "")
-            full = f"# {title}\n\n## Summary\n{summary}\n\n{client_minutes}\n\n{notes}"
+            notion_notes = self.current_learning_data.get("notion_meeting_notes", "")
             with open(file_path, "w", encoding="utf-8") as f:
-                f.write(full)
-            QMessageBox.information(self, "Exported", f"Exported notes to:\n{file_path}")
+                f.write(notion_notes)
+            QMessageBox.information(self, "Exported", f"Exported Notion notes to:\n{file_path}")
 
     def open_api_settings(self):
         diag = QDialog(self)
         diag.setWindowTitle("AI & Gemini Key Configuration")
-        diag.setMinimumWidth(520)
+        diag.setMinimumWidth(540)
         d_layout = QVBoxLayout(diag)
-        d_layout.setSpacing(12)
+        d_layout.setSpacing(14)
         
         info = QLabel(
             "<b>Connect Free Google Gemini AI</b><br>"
@@ -1109,7 +1136,7 @@ class LearningWindow(QMainWindow):
             raw = key_edit.text()
             clean = sanitize_api_key(raw)
             key_edit.setText(clean)
-            test_res_lbl.setText("Testing...")
+            test_res_lbl.setText("Testing connection...")
             test_res_lbl.setStyleSheet("color: #f59e0b;")
             valid, msg = LearningProcessor.validate_gemini_key(clean)
             if valid:
@@ -1142,7 +1169,6 @@ class LearningWindow(QMainWindow):
         d_layout.addLayout(btn_row)
 
         if diag.exec():
-            # Automatically sanitize and extract clean key
             new_key = sanitize_api_key(key_edit.text())
             new_openai = sanitize_api_key(openai_edit.text())
             self.settings["gemini_api_key"] = new_key
@@ -1151,4 +1177,4 @@ class LearningWindow(QMainWindow):
             self.processor.gemini_api_key = new_key
             self.processor.openai_api_key = new_openai
             self.update_ai_banner()
-            QMessageBox.information(self, "Saved", "AI API Keys updated and sanitized successfully!")
+            QMessageBox.information(self, "Saved", "AI API Keys updated and connected successfully!")

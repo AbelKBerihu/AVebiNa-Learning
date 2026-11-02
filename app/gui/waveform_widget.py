@@ -7,39 +7,51 @@ from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QFont
 
 class WaveformWidget(QWidget):
     """
-    A real-time animated audio oscilloscope & waveform visualizer.
-    Draws mirrored dynamic frequency wave bars and live oscilloscope curves
-    that react directly to meeting speech and microphone sound.
+    A high-sensitivity real-time audio oscilloscope & waveform visualizer.
+    Features automatic gain boost (AGC) so meeting audio (Google Meet, Zoom)
+    and microphone speech visibly bounce and wave across the bar.
     """
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(75)
-        self.setMinimumWidth(260)
+        self.setFixedHeight(80)
+        self.setMinimumWidth(280)
 
         self.is_recording = False
-        self.level = 0.0
+        self.raw_level = 0.0
+        self.boosted_level = 0.0
         self.phase = 0.0
         self.recent_samples = np.zeros(64, dtype=np.float32)
 
-        # 40 FPS refresh timer for fluid animation
+    @property
+    def level(self) -> float:
+        return self.raw_level
+
+        # 40 FPS refresh timer for fluid 60-hz-like animation
         self.anim_timer = QTimer(self)
-        self.anim_timer.setInterval(25)  # 40 fps
+        self.anim_timer.setInterval(25)
         self.anim_timer.timeout.connect(self._animate_frame)
         self.anim_timer.start()
 
     def set_recording_state(self, is_recording: bool):
         self.is_recording = is_recording
         if not is_recording:
-            self.level = 0.0
+            self.raw_level = 0.0
+            self.boosted_level = 0.0
             self.recent_samples.fill(0)
         self.update()
 
     def update_audio_data(self, level: float, raw_chunk: Optional[np.ndarray] = None):
         """Called when new audio samples arrive from the recorder callback."""
         try:
-            self.level = max(0.0, min(1.0, float(level)))
+            val = max(0.0, min(1.0, float(level)))
+            self.raw_level = val
+
+            # High-Sensitivity Dynamic Auto-Gain:
+            # Browser and Google Meet audio levels are often soft (~0.01 - 0.05).
+            # Square-root expansion + 4x boost makes soft speech visibly wave!
+            self.boosted_level = min(1.0, math.sqrt(val) * 3.8 + val * 2.0)
+
             if raw_chunk is not None and len(raw_chunk) > 0:
-                # Convert raw_chunk to flat 1D float32 array
                 arr = np.asarray(raw_chunk, dtype=np.float32)
                 if arr.ndim > 1:
                     arr = np.mean(arr, axis=1)
@@ -48,12 +60,14 @@ class WaveformWidget(QWidget):
                 step = max(1, len(float_chunk) // 64)
                 sampled = np.abs(float_chunk[::step][:64])
                 if len(sampled) == 64:
-                    self.recent_samples = (0.6 * self.recent_samples + 0.4 * sampled).astype(np.float32)
+                    # Apply gain boost to raw sample visualization
+                    boosted_samples = np.clip(np.sqrt(sampled) * 3.5, 0.0, 1.0)
+                    self.recent_samples = (0.5 * self.recent_samples + 0.5 * boosted_samples).astype(np.float32)
         except Exception:
             pass
 
     def _animate_frame(self):
-        self.phase += 0.15
+        self.phase += 0.20
         if self.phase > 2 * math.pi:
             self.phase -= 2 * math.pi
         self.update()
@@ -67,61 +81,63 @@ class WaveformWidget(QWidget):
             h = self.height()
             mid_y = h / 2.0
 
-            # Background rounded box
+            # Background box
             bg_rect = self.rect()
             painter.setPen(QPen(QColor("#334155"), 1))
             painter.setBrush(QBrush(QColor("#090d16")))
             painter.drawRoundedRect(bg_rect, 8, 8)
 
             if not self.is_recording:
-                # Idle state: Subtle glowing centerline
+                # Idle state: Subtle dashed centerline
                 painter.setPen(QPen(QColor("#475569"), 1, Qt.PenStyle.DashLine))
-                painter.drawLine(10, int(mid_y), w - 10, int(mid_y))
+                painter.drawLine(12, int(mid_y), w - 12, int(mid_y))
 
                 painter.setPen(QColor("#64748b"))
                 font = QFont("sans-serif", 10)
                 painter.setFont(font)
-                painter.drawText(bg_rect, Qt.AlignmentFlag.AlignCenter, "Ready to listen (Sound waves will display here)")
+                painter.drawText(bg_rect, Qt.AlignmentFlag.AlignCenter, "Ready to listen (Sound waves will bounce when playing)")
                 return
 
-            # Active Recording: Mirrored dynamic waveform bars & glow curve
-            num_bars = 48
+            # Active Recording: Mirrored dynamic waveform bars
+            num_bars = 52
             bar_spacing = (w - 24) / float(num_bars)
-            max_bar_h = (h - 18) / 2.0
+            max_bar_h = (h - 22) / 2.0
+
+            active_level = max(self.boosted_level, float(np.mean(self.recent_samples)))
 
             for i in range(num_bars):
-                # Ensure sample_val is strictly a scalar float
                 idx = int((i / num_bars) * len(self.recent_samples))
-                if 0 <= idx < len(self.recent_samples):
-                    val = self.recent_samples[idx]
-                    sample_val = float(np.mean(val)) if hasattr(val, '__len__') else float(val)
-                else:
-                    sample_val = 0.0
+                val = self.recent_samples[idx] if 0 <= idx < len(self.recent_samples) else 0.0
+                sample_val = float(np.mean(val)) if hasattr(val, '__len__') else float(val)
 
-                wave_mod = float(0.5 + 0.5 * math.sin(self.phase + (i * 0.25)))
-                amp = float(sample_val * 0.8 + self.level * 0.5)
-                bar_height = float(max(3.0, amp * max_bar_h * wave_mod))
+                # Oscillating wave ripple envelope
+                wave_mod = float(0.4 + 0.6 * math.sin(self.phase + (i * 0.35)))
+                
+                # Minimum lively height when recording so it's always breathing
+                min_h = 4.0 + 2.5 * math.sin(self.phase * 1.5 + i * 0.2)
+                amp = max(sample_val * 1.2, active_level * 0.9)
+                bar_height = float(max(min_h, amp * max_bar_h * wave_mod))
 
                 x = 12 + i * bar_spacing
                 top_y = mid_y - bar_height
                 bot_y = mid_y + bar_height
 
-                # Color gradient: Cyan -> Emerald Green -> Orange/Red for loud peaks
-                if self.level > 0.7:
-                    bar_color = QColor("#f43f5e")  # red
-                elif self.level > 0.4:
-                    bar_color = QColor("#38bdf8")  # cyan
+                # Gradient color: Cyan -> Emerald Green -> Orange/Red on vocal peaks
+                if active_level > 0.65:
+                    bar_color = QColor("#f43f5e")  # red peak
+                elif active_level > 0.25:
+                    bar_color = QColor("#38bdf8")  # vibrant cyan
                 else:
-                    bar_color = QColor("#10b981")  # emerald green
+                    bar_color = QColor("#10b981")  # lively emerald green
 
                 painter.setPen(QPen(bar_color, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
                 painter.drawLine(int(x), int(top_y), int(x), int(bot_y))
 
-            # Centerline pulse
-            painter.setPen(QPen(QColor(56, 189, 248, 80), 1))
-            painter.drawLine(10, int(mid_y), w - 10, int(mid_y))
+            # Centerline glow pulse
+            painter.setPen(QPen(QColor(56, 189, 248, 90), 1))
+            painter.drawLine(12, int(mid_y), w - 12, int(mid_y))
 
-            # Live Recording Pulsing Badge in top left
+            # Pulsing Red Recording Indicator
             pulse_alpha = int(180 + 75 * math.sin(self.phase * 2))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(239, 68, 68, pulse_alpha))
@@ -131,6 +147,5 @@ class WaveformWidget(QWidget):
             font = QFont("sans-serif", 9, QFont.Weight.Bold)
             painter.setFont(font)
             painter.drawText(26, 18, "LIVE RECORDING")
-        except Exception as e:
-            # Prevent any uncaught paintEvent exception from crashing Qt
+        except Exception:
             pass
