@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local Databases & Server runtime files
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+*.sqlite3
+server_notes.db
+
+# Audio recordings & caches
+recordings/
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.flac
+*.webm
+*.mp4
+.cache/
+
+# Local client settings & secrets
+settings.json
+.env
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+desktop.ini
