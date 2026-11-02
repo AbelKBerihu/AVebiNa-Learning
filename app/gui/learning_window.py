@@ -9,20 +9,25 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QLineEdit, QTextEdit, QTextBrowser,
     QTabWidget, QFileDialog, QMessageBox, QFrame, QProgressBar,
-    QCheckBox, QScrollArea, QSplitter, QSlider
+    QCheckBox, QScrollArea, QSplitter, QSlider, QInputDialog, QListWidget, QListWidgetItem
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 
 from app.audio.recorder import AudioRecorder
 from app.audio.player import AudioPlayer
 from app.audio.ai_processor import LearningProcessor
+from app.gui.waveform_widget import WaveformWidget
+from app.gui.podcast_widget import PodcastWidget
 from app.gui.flashcard_widget import FlashcardWidget
 from app.gui.quiz_widget import QuizWidget
 from app.gui.theme import DARK_THEME, get_markdown_css
 from app.models import Item
 from app.storage import Storage
 from app.sync_engine import SyncEngine
-from app.config import get_db_path, load_settings, save_settings
+from app.config import (
+    get_db_path, get_recordings_dir, open_folder_in_file_manager,
+    load_settings, save_settings
+)
 
 class AudioProcessWorker(QThread):
     finished = pyqtSignal(dict)
@@ -41,6 +46,27 @@ class AudioProcessWorker(QThread):
         except Exception as e:
             self.failed.emit(str(e))
 
+class VideoProcessWorker(QThread):
+    finished = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, processor: LearningProcessor, target: str, is_url: bool, topic_hint: str):
+        super().__init__()
+        self.processor = processor
+        self.target = target
+        self.is_url = is_url
+        self.topic_hint = topic_hint
+
+    def run(self):
+        try:
+            if self.is_url:
+                result = self.processor.process_youtube_url(self.target, self.topic_hint)
+            else:
+                result = self.processor.process_video_file(self.target, self.topic_hint)
+            self.finished.emit(result)
+        except Exception as e:
+            self.failed.emit(str(e))
+
 class TutorWorker(QThread):
     answered = pyqtSignal(str)
     failed = pyqtSignal(str)
@@ -53,7 +79,7 @@ class TutorWorker(QThread):
 
     def run(self):
         try:
-            ans = self.processor.ask_ai_tutor(self.context, self.question)
+            ans = self.processor.ask_grounded_tutor(self.context, self.question)
             self.answered.emit(ans)
         except Exception as e:
             self.failed.emit(str(e))
@@ -64,16 +90,20 @@ class LearningWindow(QMainWindow):
         self.storage = storage or Storage(get_db_path())
         self.settings = load_settings()
 
-        self.setWindowTitle("CrossSync LearnEcho — Live Meeting & Lecture AI Study Companion")
-        self.resize(1200, 850)
+        self.setWindowTitle("AVebiNa Learning — Live Meeting AI Companion & NotebookLM Studio")
+        self.resize(1280, 880)
         self.setStyleSheet(DARK_THEME)
 
-        self.recorder = AudioRecorder(on_level_update=self.on_audio_level_update)
+        self.recorder = AudioRecorder(on_level_update=self.on_audio_data_update)
         self.player = AudioPlayer(
             on_progress=self.on_playback_progress,
             on_finished=self.on_playback_finished
         )
-        self.processor = LearningProcessor(self.settings.get("gemini_api_key", os.environ.get("GEMINI_API_KEY", "")))
+        self.processor = LearningProcessor(
+            gemini_api_key=self.settings.get("gemini_api_key", os.environ.get("GEMINI_API_KEY", "")),
+            openai_api_key=self.settings.get("openai_api_key", os.environ.get("OPENAI_API_KEY", "")),
+            ollama_endpoint=self.settings.get("ollama_endpoint", "http://localhost:11434")
+        )
 
         self.sync_engine = SyncEngine(
             storage=self.storage,
@@ -83,9 +113,9 @@ class LearningWindow(QMainWindow):
 
         self.recorded_audio_path: Optional[str] = None
         self.current_learning_data: Dict[str, Any] = {}
+        self.notebook_sources: List[Dict[str, str]] = []
         self.record_seconds = 0
-        self.audio_worker: Optional[AudioProcessWorker] = None
-        self.tutor_worker: Optional[TutorWorker] = None
+        self.worker: Optional[QThread] = None
 
         # Timer for recording clock
         self.record_timer = QTimer(self)
@@ -94,133 +124,119 @@ class LearningWindow(QMainWindow):
 
         self.init_ui()
         self.refresh_audio_devices()
+        self.update_ai_banner()
 
     def init_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(14, 14, 14, 14)
+        main_layout.setSpacing(10)
 
-        # 1. Top Audio Capture & Control Banner
+        # 1. AI API Status & Storage Banner
+        top_info_banner = self._create_ai_status_banner()
+        main_layout.addWidget(top_info_banner)
+
+        # 2. Top Audio Capture & Waveform Visualizer Toolbar
         top_frame = self._create_audio_toolbar()
         main_layout.addWidget(top_frame)
 
-        # 2. Audio Playback Control Strip (when audio is loaded)
+        # 3. Audio Playback Control Strip
         self.playback_frame = self._create_playback_strip()
         main_layout.addWidget(self.playback_frame)
 
-        # 3. Status / Action bar
-        self.status_bar_frame = QFrame()
-        self.status_bar_frame.setStyleSheet("background-color: #1e293b; border-radius: 8px; padding: 6px 12px;")
-        sb_layout = QHBoxLayout(self.status_bar_frame)
-        sb_layout.setContentsMargins(6, 4, 6, 4)
-        
-        self.status_label = QLabel("Ready to capture audio from Google Meet, Zoom, or your microphone.")
-        self.status_label.setStyleSheet("color: #94a3b8; font-weight: 500;")
-        sb_layout.addWidget(self.status_label)
-        sb_layout.addStretch()
+        # 4. Main Notebook Splitter (NotebookLM Left Sources Drawer + Right Learning Workspace)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(1)
 
-        self.save_sync_btn = QPushButton("☁ Save & Sync to CrossSync")
-        self.save_sync_btn.setStyleSheet("background-color: #065f46; color: #34d399; font-weight: bold; padding: 6px 14px; border-radius: 6px; border: none;")
-        self.save_sync_btn.clicked.connect(self.save_and_sync_all)
-        self.save_sync_btn.setEnabled(False)
-        sb_layout.addWidget(self.save_sync_btn)
+        # Left: Notebook Sources Drawer
+        sources_pane = self._create_sources_pane()
+        splitter.addWidget(sources_pane)
 
-        self.export_anki_btn = QPushButton("Anki Flashcards (.txt)")
-        self.export_anki_btn.setProperty("class", "secondaryBtn")
-        self.export_anki_btn.setStyleSheet("padding: 6px 12px; font-size: 13px;")
-        self.export_anki_btn.clicked.connect(self.export_anki_flashcards)
-        self.export_anki_btn.setEnabled(False)
-        sb_layout.addWidget(self.export_anki_btn)
+        # Right: Notebook Workspace Tabs
+        workspace_pane = self._create_workspace_pane()
+        splitter.addWidget(workspace_pane)
 
-        self.export_html_btn = QPushButton("Print Study Guide (.html)")
-        self.export_html_btn.setProperty("class", "secondaryBtn")
-        self.export_html_btn.setStyleSheet("padding: 6px 12px; font-size: 13px;")
-        self.export_html_btn.clicked.connect(self.export_html_study_guide)
-        self.export_html_btn.setEnabled(False)
-        sb_layout.addWidget(self.export_html_btn)
+        splitter.setSizes([260, 980])
+        main_layout.addWidget(splitter, 1)
 
-        self.export_md_btn = QPushButton("Markdown")
-        self.export_md_btn.setProperty("class", "secondaryBtn")
-        self.export_md_btn.setStyleSheet("padding: 6px 12px; font-size: 13px;")
-        self.export_md_btn.clicked.connect(self.export_markdown)
-        self.export_md_btn.setEnabled(False)
-        sb_layout.addWidget(self.export_md_btn)
+    # ------------------ AI STATUS BANNER ------------------
+    def _create_ai_status_banner(self) -> QFrame:
+        banner = QFrame()
+        banner.setStyleSheet("background-color: #0f172a; border-radius: 8px; padding: 6px 14px; border: 1px solid #1e293b;")
+        layout = QHBoxLayout(banner)
+        layout.setContentsMargins(4, 2, 4, 2)
 
-        main_layout.addWidget(self.status_bar_frame)
+        self.ai_status_lbl = QLabel("")
+        layout.addWidget(self.ai_status_lbl)
 
-        # 4. Main Workspace Tabs
-        self.tabs = QTabWidget()
-        
-        # Tab 1: Study Notes & Summary
-        self.notes_tab = self._create_notes_tab()
-        self.tabs.addTab(self.notes_tab, "📝 Study Notes & Summary")
+        layout.addStretch()
 
-        # Tab 2: Flashcards
-        self.flashcard_widget = FlashcardWidget()
-        self.tabs.addTab(self.flashcard_widget, "📇 Flashcards (Active Recall)")
+        self.storage_path_lbl = QLabel(f"📂 Storage: {get_recordings_dir()}")
+        self.storage_path_lbl.setStyleSheet("color: #64748b; font-size: 12px;")
+        layout.addWidget(self.storage_path_lbl)
 
-        # Tab 3: Knowledge Check / Quiz
-        self.quiz_widget = QuizWidget()
-        self.tabs.addTab(self.quiz_widget, "❓ Quiz & Knowledge Check")
+        open_folder_btn = QPushButton("Open Folder")
+        open_folder_btn.setProperty("class", "secondaryBtn")
+        open_folder_btn.setStyleSheet("padding: 3px 10px; font-size: 11px;")
+        open_folder_btn.clicked.connect(lambda: open_folder_in_file_manager(get_recordings_dir()))
+        layout.addWidget(open_folder_btn)
 
-        # Tab 4: Action Items & Homework
-        self.tasks_tab = self._create_tasks_tab()
-        self.tabs.addTab(self.tasks_tab, "📋 Action Items & Homework")
+        self.config_ai_btn = QPushButton("🔑 Configure AI Key")
+        self.config_ai_btn.setProperty("class", "secondaryBtn")
+        self.config_ai_btn.setStyleSheet("padding: 3px 10px; font-size: 11px;")
+        self.config_ai_btn.clicked.connect(self.open_api_settings)
+        layout.addWidget(self.config_ai_btn)
 
-        # Tab 5: Transcript
-        self.transcript_browser = QTextBrowser()
-        self.transcript_browser.setObjectName("previewBrowser")
-        self.transcript_browser.setPlaceholderText("Verbatim transcript with timestamps will appear here after recording...")
-        self.tabs.addTab(self.transcript_browser, "📜 Full Transcript")
+        return banner
 
-        # Tab 6: Ask AI Study Tutor
-        self.tutor_tab = self._create_tutor_tab()
-        self.tabs.addTab(self.tutor_tab, "💬 Ask AI Study Tutor")
+    def update_ai_banner(self):
+        status = self.processor.get_active_provider_status()
+        if status["connected"]:
+            self.ai_status_lbl.setText(f"✓ AI Active: {status['name']}")
+            self.ai_status_lbl.setStyleSheet("color: #34d399; font-weight: bold; font-size: 12px;")
+            self.config_ai_btn.setText("⚙ AI Settings")
+        else:
+            self.ai_status_lbl.setText("⚠️ Free Gemini API Key required for live summarization")
+            self.ai_status_lbl.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 12px;")
+            self.config_ai_btn.setText("🔑 Enter Free API Key")
 
-        main_layout.addWidget(self.tabs, 1)
-
+    # ------------------ AUDIO CAPTURE & WAVEFORM TOOLBAR ------------------
     def _create_audio_toolbar(self) -> QFrame:
         frame = QFrame()
-        frame.setStyleSheet("background-color: #1f2937; border-radius: 12px; padding: 14px; border: 1px solid #374151;")
+        frame.setStyleSheet("background-color: #1f2937; border-radius: 12px; padding: 12px; border: 1px solid #374151;")
         layout = QVBoxLayout(frame)
         layout.setSpacing(10)
 
-        # Row 1: Source selector & controls
         row1 = QHBoxLayout()
         row1.setSpacing(10)
 
-        source_lbl = QLabel("Audio Source:")
-        source_lbl.setStyleSheet("font-weight: bold; color: #60a5fa;")
-        row1.addWidget(source_lbl)
-
+        # Device selector
+        row1.addWidget(QLabel("Source:"))
         self.device_combo = QComboBox()
-        self.device_combo.setMinimumWidth(300)
+        self.device_combo.setMinimumWidth(260)
         row1.addWidget(self.device_combo)
 
         refresh_dev_btn = QPushButton("🔄")
-        refresh_dev_btn.setToolTip("Refresh audio device list")
         refresh_dev_btn.setStyleSheet("padding: 6px 10px; background: #374151; color: white; border-radius: 6px; border: none;")
         refresh_dev_btn.clicked.connect(self.refresh_audio_devices)
         row1.addWidget(refresh_dev_btn)
 
-        # Dual audio mix option
-        self.mix_mic_check = QCheckBox("Mix in Mic (records both speaker & you)")
-        self.mix_mic_check.setToolTip("Blends your microphone with the meeting audio so both sides are heard")
+        self.mix_mic_check = QCheckBox("Mix in Mic")
+        self.mix_mic_check.setToolTip("Records both Google Meet participants and your own microphone simultaneously")
         self.mix_mic_check.setChecked(True)
         row1.addWidget(self.mix_mic_check)
 
         row1.addSpacing(10)
 
-        # Record / Stop Button
+        # Live Recording Button
         self.record_btn = QPushButton("⏺ Start Listening / Record")
         self.record_btn.setStyleSheet("""
             QPushButton {
                 background-color: #dc2626;
                 color: #ffffff;
                 font-weight: bold;
-                padding: 10px 20px;
+                padding: 10px 18px;
                 border-radius: 8px;
                 font-size: 14px;
                 border: none;
@@ -230,64 +246,46 @@ class LearningWindow(QMainWindow):
         self.record_btn.clicked.connect(self.toggle_recording)
         row1.addWidget(self.record_btn)
 
-        # Timer
         self.timer_lbl = QLabel("00:00:00")
-        self.timer_lbl.setStyleSheet("font-family: monospace; font-size: 18px; font-weight: bold; color: #f3f4f6; padding: 0 10px;")
+        self.timer_lbl.setStyleSheet("font-family: monospace; font-size: 18px; font-weight: bold; color: #f3f4f6; padding: 0 8px;")
         row1.addWidget(self.timer_lbl)
 
-        # VU Meter Bar
-        self.vu_bar = QProgressBar()
-        self.vu_bar.setRange(0, 100)
-        self.vu_bar.setValue(0)
-        self.vu_bar.setFixedWidth(120)
-        self.vu_bar.setFixedHeight(12)
-        self.vu_bar.setTextVisible(False)
-        self.vu_bar.setStyleSheet("""
-            QProgressBar { background: #111827; border-radius: 6px; border: 1px solid #374151; }
-            QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10b981, stop:0.7 #f59e0b, stop:1 #ef4444); border-radius: 6px; }
-        """)
-        row1.addWidget(self.vu_bar)
-
-        row1.addStretch()
-
-        # Import File button
-        import_btn = QPushButton("📁 Import Audio")
-        import_btn.setProperty("class", "secondaryBtn")
-        import_btn.setToolTip("Import existing recording (.mp3, .wav, .m4a, .webm)")
-        import_btn.clicked.connect(self.import_audio_file)
-        row1.addWidget(import_btn)
-
-        # Settings
-        api_btn = QPushButton("⚙ Settings")
-        api_btn.setProperty("class", "secondaryBtn")
-        api_btn.clicked.connect(self.open_api_settings)
-        row1.addWidget(api_btn)
+        # Real Live Waveform Oscilloscope Widget
+        self.waveform_widget = WaveformWidget()
+        row1.addWidget(self.waveform_widget, 1)
 
         layout.addLayout(row1)
 
-        # Row 2: Lecture / Meeting Topic Context
+        # Row 2: Topic & NotebookLM actions
         row2 = QHBoxLayout()
-        topic_lbl = QLabel("Topic / Subject:")
-        topic_lbl.setStyleSheet("color: #9ca3af; font-size: 13px;")
-        row2.addWidget(topic_lbl)
-
+        row2.addWidget(QLabel("Session Topic:"))
         self.topic_input = QLineEdit()
-        self.topic_input.setPlaceholderText("e.g. Google Meet: Distributed Systems Lecture 3")
+        self.topic_input.setPlaceholderText("e.g. Google Meet: Biology 101 Lecture — Photosynthesis & Cellular Respiration")
         row2.addWidget(self.topic_input, 1)
 
-        self.reprocess_btn = QPushButton("✨ Generate Learning Notes")
+        self.watch_video_btn = QPushButton("🎥 Watch Video / YouTube")
+        self.watch_video_btn.setProperty("class", "secondaryBtn")
+        self.watch_video_btn.clicked.connect(self.watch_and_summarize_video)
+        row2.addWidget(self.watch_video_btn)
+
+        import_btn = QPushButton("📁 Import Audio")
+        import_btn.setProperty("class", "secondaryBtn")
+        import_btn.clicked.connect(self.import_audio_file)
+        row2.addWidget(import_btn)
+
+        self.reprocess_btn = QPushButton("✨ Synthesize NotebookLM Study Guide")
         self.reprocess_btn.setStyleSheet("background-color: #2563eb; color: #ffffff; font-weight: bold; padding: 8px 16px; border-radius: 8px; border: none;")
         self.reprocess_btn.clicked.connect(self.trigger_ai_processing)
         self.reprocess_btn.setEnabled(False)
         row2.addWidget(self.reprocess_btn)
 
         layout.addLayout(row2)
-
         return frame
 
+    # ------------------ PLAYBACK STRIP ------------------
     def _create_playback_strip(self) -> QFrame:
         frame = QFrame()
-        frame.setStyleSheet("background-color: #111827; border-radius: 8px; padding: 8px 12px; border: 1px solid #374151;")
+        frame.setStyleSheet("background-color: #111827; border-radius: 8px; padding: 6px 12px; border: 1px solid #1f2937;")
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(6, 2, 6, 2)
         layout.setSpacing(10)
@@ -322,25 +320,120 @@ class LearningWindow(QMainWindow):
 
         return frame
 
-    def _create_notes_tab(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(10, 10, 10, 10)
+    # ------------------ NOTEBOOKLM SOURCES DRAWER ------------------
+    def _create_sources_pane(self) -> QWidget:
+        pane = QFrame()
+        pane.setStyleSheet("background-color: #111827; border-right: 1px solid #374151; padding: 6px;")
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(6, 10, 6, 10)
+        layout.setSpacing(8)
 
+        lbl = QLabel("NOTEBOOK SOURCES")
+        lbl.setStyleSheet("font-size: 11px; font-weight: bold; color: #60a5fa; padding: 4px;")
+        layout.addWidget(lbl)
+
+        self.sources_list = QListWidget()
+        self.sources_list.setStyleSheet("background: transparent; border: none;")
+        layout.addWidget(self.sources_list, 1)
+
+        add_doc_btn = QPushButton("+ Add Document (.pdf/.txt)")
+        add_doc_btn.setProperty("class", "secondaryBtn")
+        add_doc_btn.setStyleSheet("font-size: 12px; padding: 6px;")
+        add_doc_btn.clicked.connect(self.import_document_file)
+        layout.addWidget(add_doc_btn)
+
+        return pane
+
+    # ------------------ WORKSPACE TABS ------------------
+    def _create_workspace_pane(self) -> QWidget:
+        pane = QWidget()
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(10, 0, 0, 0)
+        layout.setSpacing(8)
+
+        # Action Strip
+        action_strip = QHBoxLayout()
+        self.status_label = QLabel("Ready. Audio waveform visualizer is active.")
+        self.status_label.setStyleSheet("color: #94a3b8; font-weight: 500;")
+        action_strip.addWidget(self.status_label)
+        action_strip.addStretch()
+
+        self.save_sync_btn = QPushButton("☁ Save & Sync to CrossSync")
+        self.save_sync_btn.setStyleSheet("background-color: #065f46; color: #34d399; font-weight: bold; padding: 6px 14px; border-radius: 6px; border: none;")
+        self.save_sync_btn.clicked.connect(self.save_and_sync_all)
+        self.save_sync_btn.setEnabled(False)
+        action_strip.addWidget(self.save_sync_btn)
+
+        self.export_anki_btn = QPushButton("Anki Flashcards (.txt)")
+        self.export_anki_btn.setProperty("class", "secondaryBtn")
+        self.export_anki_btn.setStyleSheet("padding: 6px 12px; font-size: 13px;")
+        self.export_anki_btn.clicked.connect(self.export_anki_flashcards)
+        self.export_anki_btn.setEnabled(False)
+        action_strip.addWidget(self.export_anki_btn)
+
+        self.export_html_btn = QPushButton("Print Study Guide (.html)")
+        self.export_html_btn.setProperty("class", "secondaryBtn")
+        self.export_html_btn.setStyleSheet("padding: 6px 12px; font-size: 13px;")
+        self.export_html_btn.clicked.connect(self.export_html_study_guide)
+        self.export_html_btn.setEnabled(False)
+        action_strip.addWidget(self.export_html_btn)
+
+        self.export_md_btn = QPushButton("Markdown")
+        self.export_md_btn.setProperty("class", "secondaryBtn")
+        self.export_md_btn.setStyleSheet("padding: 6px 12px; font-size: 13px;")
+        self.export_md_btn.clicked.connect(self.export_markdown)
+        self.export_md_btn.setEnabled(False)
+        action_strip.addWidget(self.export_md_btn)
+
+        layout.addLayout(action_strip)
+
+        # Tabs
+        self.tabs = QTabWidget()
+
+        # Tab 1: Study Notes & Executive Summary
         self.notes_browser = QTextBrowser()
         self.notes_browser.setObjectName("previewBrowser")
         self.notes_browser.setHtml(
             f"<style>{get_markdown_css()}</style>"
-            "<h2>Welcome to LearnEcho</h2>"
-            "<p>Capture any lecture or Google Meeting live, or import an existing audio recording.</p>"
+            "<h2>Welcome to AVebiNa Learning & NotebookLM Studio</h2>"
+            "<p>Capture any lecture or Google Meeting live, or import video files to watch and summarize.</p>"
             "<ul>"
-            "<li><b>Live Meeting Audio:</b> Select <i>[System / Meeting Audio]</i> in the dropdown to hear your computer's sound directly from Chrome/Meet/Zoom.</li>"
-            "<li><b>Microphone:</b> Check <i>Mix in Mic</i> to hear both the presenter and yourself.</li>"
-            "<li><b>Instant AI Learning:</b> Automatically generates summaries, comprehensive study notes, flashcards, quizzes, and homework checklists!</li>"
+            "<li><b>Live Waveform:</b> The animated wave bar shows live vocal speech frequencies in real time.</li>"
+            "<li><b>Google Meet Audio:</b> Select <i>[System / Meeting Audio]</i> to capture participant audio directly.</li>"
+            "<li><b>NotebookLM Two-Host Podcast:</b> Generates engaging conversational Audio Overview dialogues.</li>"
+            "<li><b>Watch & Summarize:</b> Processes video files (.mp4) and YouTube links.</li>"
             "</ul>"
         )
-        layout.addWidget(self.notes_browser)
-        return widget
+        self.tabs.addTab(self.notes_browser, "📝 Study Notes & Summary")
+
+        # Tab 2: NotebookLM Two-Host Deep Dive Podcast
+        self.podcast_widget = PodcastWidget()
+        self.tabs.addTab(self.podcast_widget, "🎙 Deep Dive Podcast (Audio Overview)")
+
+        # Tab 3: Interactive Flashcards
+        self.flashcard_widget = FlashcardWidget()
+        self.tabs.addTab(self.flashcard_widget, "📇 Flashcards (Active Recall)")
+
+        # Tab 4: Knowledge Check Quiz
+        self.quiz_widget = QuizWidget()
+        self.tabs.addTab(self.quiz_widget, "❓ Quiz & Knowledge Check")
+
+        # Tab 5: Action Items & Homework
+        self.tasks_tab = self._create_tasks_tab()
+        self.tabs.addTab(self.tasks_tab, "📋 Action Items & Homework")
+
+        # Tab 6: Verbatim Transcript
+        self.transcript_browser = QTextBrowser()
+        self.transcript_browser.setObjectName("previewBrowser")
+        self.transcript_browser.setPlaceholderText("Verbatim transcript with timestamps will appear here after recording...")
+        self.tabs.addTab(self.transcript_browser, "📜 Full Transcript")
+
+        # Tab 7: Grounded NotebookLM Chat
+        self.tutor_tab = self._create_tutor_tab()
+        self.tabs.addTab(self.tutor_tab, "💬 Grounded NotebookLM Chat")
+
+        layout.addWidget(self.tabs, 1)
+        return pane
 
     def _create_tasks_tab(self) -> QWidget:
         widget = QWidget()
@@ -370,17 +463,17 @@ class LearningWindow(QMainWindow):
         self.tutor_history.setObjectName("previewBrowser")
         self.tutor_history.setHtml(
             f"<style>{get_markdown_css()}</style>"
-            "<p><b>AI Tutor is ready!</b> After recording, ask any question about the concepts covered in your lecture.</p>"
+            "<p><b>NotebookLM Grounded Chat ready!</b> Ask any question about your recorded meeting, video, or lecture sources. Responses include citations.</p>"
         )
         layout.addWidget(self.tutor_history, 1)
 
         input_row = QHBoxLayout()
         self.tutor_input = QLineEdit()
-        self.tutor_input.setPlaceholderText("Ask a question about this lecture... (e.g. 'Can you explain the main equation in simple terms?')")
+        self.tutor_input.setPlaceholderText("Ask a question about your sources... (e.g. 'What was discussed in minute 14?')")
         self.tutor_input.returnPressed.connect(self.ask_tutor)
         input_row.addWidget(self.tutor_input, 1)
 
-        send_btn = QPushButton("Ask Tutor")
+        send_btn = QPushButton("Ask Sources")
         send_btn.setProperty("class", "primaryBtn")
         send_btn.clicked.connect(self.ask_tutor)
         input_row.addWidget(send_btn)
@@ -388,7 +481,7 @@ class LearningWindow(QMainWindow):
         layout.addLayout(input_row)
         return widget
 
-    # ------------------ AUDIO CAPTURE LOGIC ------------------
+    # ------------------ AUDIO CAPTURE & WAVEFORM ------------------
     def refresh_audio_devices(self):
         self.device_combo.clear()
         devices = self.recorder.get_audio_devices()
@@ -397,16 +490,15 @@ class LearningWindow(QMainWindow):
         for i, dev in enumerate(devices):
             self.device_combo.addItem(dev["display_name"], dev["id"])
             if dev.get("is_loopback"):
-                default_idx = i  # Prefer meeting loopback if available
+                default_idx = i
             elif dev.get("is_default") and default_idx == 0:
                 default_idx = i
 
         if devices:
             self.device_combo.setCurrentIndex(default_idx)
 
-    def on_audio_level_update(self, level: float):
-        val = int(level * 100)
-        self.vu_bar.setValue(val)
+    def on_audio_data_update(self, level: float, chunk: Optional[Any] = None):
+        self.waveform_widget.update_audio_data(level, chunk)
 
     def update_record_timer(self):
         self.record_seconds += 1
@@ -422,7 +514,6 @@ class LearningWindow(QMainWindow):
             dev_id = self.device_combo.currentData()
             sec_dev_id = None
             if self.mix_mic_check.isChecked():
-                # Find default microphone
                 devices = self.recorder.get_audio_devices()
                 mic_dev = next((d for d in devices if not d.get("is_loopback")), None)
                 if mic_dev and mic_dev["id"] != dev_id:
@@ -437,6 +528,7 @@ class LearningWindow(QMainWindow):
             self.record_seconds = 0
             self.timer_lbl.setText("00:00:00")
             self.record_timer.start()
+            self.waveform_widget.set_recording_state(True)
 
             self.record_btn.setText("⏹ Stop & Analyze")
             self.record_btn.setStyleSheet("""
@@ -444,23 +536,28 @@ class LearningWindow(QMainWindow):
                     background-color: #e11d48;
                     color: #ffffff;
                     font-weight: bold;
-                    padding: 10px 20px;
+                    padding: 10px 18px;
                     border-radius: 8px;
                     font-size: 14px;
                     border: 2px solid #fda4af;
                 }
             """)
-            self.status_label.setText("🎙 Listening and recording audio live...")
+            self.status_label.setText("🎙 Live recording active. Dynamic waveform visualizer is bouncing with speech.")
             self.status_label.setStyleSheet("color: #f43f5e; font-weight: bold;")
             self.device_combo.setEnabled(False)
             self.reprocess_btn.setEnabled(False)
         else:
             # STOP RECORDING
             self.record_timer.stop()
-            self.vu_bar.setValue(0)
-            self.status_label.setText("Saving audio recording...")
+            self.waveform_widget.set_recording_state(False)
+            self.status_label.setText("Saving audio recording to disk...")
 
-            saved_path = self.recorder.stop_recording()
+            # Save in designated recordings directory
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = f"session_{timestamp}.wav"
+            target_path = str(get_recordings_dir() / filename)
+
+            saved_path = self.recorder.stop_recording(output_filepath=target_path)
             self.recorded_audio_path = saved_path
 
             self.record_btn.setText("⏺ Start Listening / Record")
@@ -469,7 +566,7 @@ class LearningWindow(QMainWindow):
                     background-color: #dc2626;
                     color: #ffffff;
                     font-weight: bold;
-                    padding: 10px 20px;
+                    padding: 10px 18px;
                     border-radius: 8px;
                     font-size: 14px;
                     border: none;
@@ -480,27 +577,95 @@ class LearningWindow(QMainWindow):
             self.reprocess_btn.setEnabled(True)
 
             if saved_path:
-                self.status_label.setText(f"Audio saved ({Path(saved_path).name}). Analyzing with AI...")
+                self.add_source_to_drawer("🎙 Live Meeting Audio", Path(saved_path).name, saved_path)
+                self.status_label.setText(f"Saved: {Path(saved_path).name}. Synthesizing NotebookLM study guide...")
                 self.load_audio_into_player(saved_path)
                 self.trigger_ai_processing()
             else:
                 self.status_label.setText("No audio was recorded.")
 
+    def add_source_to_drawer(self, source_type: str, name: str, path: str):
+        self.notebook_sources.append({"type": source_type, "name": name, "path": path})
+        item = QListWidgetItem(f"{source_type}\n  {name}")
+        self.sources_list.addItem(item)
+
+    # ------------------ WATCH VIDEO & IMPORT ------------------
+    def watch_and_summarize_video(self):
+        """Allows user to either import a video file or enter a YouTube URL to watch & summarize."""
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Watch then Summarize",
+            "Choose Video Source:",
+            ["1. Local Video File (.mp4, .webm, .mkv, .mov)", "2. YouTube / Meeting Video URL"],
+            0,
+            False
+        )
+        if not ok:
+            return
+
+        if "Local Video" in choice:
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select Video File to Watch & Summarize",
+                "",
+                "Video Files (*.mp4 *.webm *.mkv *.mov *.avi);;All Files (*)"
+            )
+            if file_path:
+                self.recorded_audio_path = file_path
+                self.add_source_to_drawer("🎥 Video File", Path(file_path).name, file_path)
+                if not self.topic_input.text():
+                    self.topic_input.setText(Path(file_path).stem.replace("_", " ").title())
+                self.status_label.setText(f"Analyzing video: {Path(file_path).name}...")
+                self.worker = VideoProcessWorker(self.processor, file_path, is_url=False, topic_hint=self.topic_input.text())
+                self.worker.finished.connect(self.on_processing_finished)
+                self.worker.failed.connect(self.on_processing_failed)
+                self.worker.start()
+        else:
+            url, ok = QInputDialog.getText(self, "Watch YouTube / Meeting Video", "Enter Video URL:")
+            if ok and url.strip():
+                url = url.strip()
+                self.add_source_to_drawer("🌐 Web Video", url[:35] + "...", url)
+                self.status_label.setText("Downloading audio stream & watching video...")
+                self.worker = VideoProcessWorker(self.processor, url, is_url=True, topic_hint=self.topic_input.text())
+                self.worker.finished.connect(self.on_processing_finished)
+                self.worker.failed.connect(self.on_processing_failed)
+                self.worker.start()
+
     def import_audio_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Select Meeting or Lecture Recording",
+            "Select Audio File",
             "",
-            "Audio & Video Files (*.wav *.mp3 *.m4a *.ogg *.flac *.webm *.mp4);;All Files (*)"
+            "Audio Files (*.wav *.mp3 *.m4a *.ogg *.flac *.webm);;All Files (*)"
         )
         if file_path:
             self.recorded_audio_path = file_path
-            self.reprocess_btn.setEnabled(True)
-            self.status_label.setText(f"Imported file: {Path(file_path).name}")
+            self.add_source_to_drawer("📁 Audio File", Path(file_path).name, file_path)
             if not self.topic_input.text():
                 self.topic_input.setText(Path(file_path).stem.replace("_", " ").title())
             self.load_audio_into_player(file_path)
             self.trigger_ai_processing()
+
+    def import_document_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Document to Add as Source",
+            "",
+            "Text & Markdown Files (*.txt *.md *.py *.json *.csv);;All Files (*)"
+        )
+        if file_path:
+            self.add_source_to_drawer("📄 Document", Path(file_path).name, file_path)
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                # Append to current notes context
+                current_text = self.notes_browser.toPlainText()
+                new_context = f"{current_text}\n\n# Document Source: {Path(file_path).name}\n\n{content}"
+                styled_html = f"<style>{get_markdown_css()}</style>{markdown.markdown(new_context)}"
+                self.notes_browser.setHtml(styled_html)
+                QMessageBox.information(self, "Document Added", f"Added '{Path(file_path).name}' as a grounded source!")
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Could not read document: {e}")
 
     # ------------------ PLAYBACK LOGIC ------------------
     def load_audio_into_player(self, file_path: str):
@@ -548,18 +713,18 @@ class LearningWindow(QMainWindow):
     # ------------------ AI PROCESSING ------------------
     def trigger_ai_processing(self):
         if not self.recorded_audio_path:
-            QMessageBox.information(self, "No Audio", "Please record or import an audio file first.")
+            QMessageBox.information(self, "No Source", "Please record or import an audio or video file first.")
             return
 
         topic = self.topic_input.text().strip()
-        self.status_label.setText("🤖 AI is listening to audio, transcribing, and generating study notes...")
+        self.status_label.setText("🤖 Synthesizing NotebookLM Study Guide (Podcast, Notes, Flashcards)...")
         self.status_label.setStyleSheet("color: #38bdf8; font-weight: bold;")
         self.reprocess_btn.setEnabled(False)
 
-        self.audio_worker = AudioProcessWorker(self.processor, self.recorded_audio_path, topic)
-        self.audio_worker.finished.connect(self.on_processing_finished)
-        self.audio_worker.failed.connect(self.on_processing_failed)
-        self.audio_worker.start()
+        self.worker = AudioProcessWorker(self.processor, self.recorded_audio_path, topic)
+        self.worker.finished.connect(self.on_processing_finished)
+        self.worker.failed.connect(self.on_processing_failed)
+        self.worker.start()
 
     def on_processing_finished(self, data: dict):
         self.reprocess_btn.setEnabled(True)
@@ -569,13 +734,14 @@ class LearningWindow(QMainWindow):
         self.export_md_btn.setEnabled(True)
         self.current_learning_data = data
 
-        self.status_label.setText("✓ Learning materials generated successfully!")
+        self.status_label.setText("✓ NotebookLM Study Package Synthesized Successfully!")
         self.status_label.setStyleSheet("color: #34d399; font-weight: bold;")
 
-        title = data.get("title", "Lecture Study Notes")
+        title = data.get("title", "Lecture Study Guide")
         if not self.topic_input.text():
             self.topic_input.setText(title)
 
+        # 1. Render Study Notes Tab
         summary = data.get("summary", "")
         study_notes = data.get("study_notes", "")
         full_md = f"# {title}\n\n## Executive Summary\n{summary}\n\n{study_notes}"
@@ -583,26 +749,34 @@ class LearningWindow(QMainWindow):
         styled_html = f"<style>{get_markdown_css()}</style>{html}"
         self.notes_browser.setHtml(styled_html)
 
+        # 2. Render NotebookLM Two-Host Podcast Tab
+        podcast = data.get("deep_dive_podcast", [])
+        self.podcast_widget.load_podcast(podcast)
+
+        # 3. Render Flashcards
         flashcards = data.get("flashcards", [])
         self.flashcard_widget.load_cards(flashcards)
 
+        # 4. Render Quiz
         quiz = data.get("quiz", [])
         self.quiz_widget.load_quiz(quiz)
 
+        # 5. Render Action Items
         self._populate_tasks(data.get("action_items", []))
 
+        # 6. Render Transcript
         transcript = data.get("transcript", "No transcript available.")
         self.transcript_browser.setPlainText(transcript)
 
     def on_processing_failed(self, error: str):
         self.reprocess_btn.setEnabled(True)
-        self.status_label.setText(f"AI processing notice: {error}")
+        self.status_label.setText(f"AI notice: {error}")
         self.status_label.setStyleSheet("color: #ef4444;")
         QMessageBox.warning(
             self,
-            "AI Processing Notice",
-            f"Could not complete online AI processing:\n\n{error}\n\n"
-            "You can add your Google Gemini API key in Settings (⚙) to enable direct cloud audio processing."
+            "AI Notice",
+            f"Could not complete AI processing:\n\n{error}\n\n"
+            "Please configure your Google Gemini API key in Settings (⚙) to enable live transcription."
         )
 
     def _populate_tasks(self, action_items: List[Dict[str, Any]]):
@@ -636,7 +810,7 @@ class LearningWindow(QMainWindow):
 
             self.tasks_layout.insertWidget(self.tasks_layout.count() - 1, task_box)
 
-    # ------------------ ASK AI TUTOR ------------------
+    # ------------------ NOTEBOOKLM GROUNDED CHAT ------------------
     def ask_tutor(self):
         question = self.tutor_input.text().strip()
         if not question:
@@ -645,17 +819,17 @@ class LearningWindow(QMainWindow):
         context = self.current_learning_data.get("study_notes") or self.notes_browser.toPlainText()
         self.tutor_input.clear()
 
-        user_block = f"<p style='color: #60a5fa;'><b>You:</b> {question}</p><p style='color: #94a3b8;'><i>Tutor is thinking...</i></p>"
+        user_block = f"<p style='color: #60a5fa;'><b>You:</b> {question}</p><p style='color: #94a3b8;'><i>NotebookLM is searching sources...</i></p>"
         self.tutor_history.append(user_block)
 
-        self.tutor_worker = TutorWorker(self.processor, context, question)
-        self.tutor_worker.answered.connect(self.on_tutor_answered)
-        self.tutor_worker.failed.connect(lambda err: self.tutor_history.append(f"<p style='color: #ef4444;'>Error: {err}</p>"))
-        self.tutor_worker.start()
+        self.worker = TutorWorker(self.processor, context, question)
+        self.worker.answered.connect(self.on_tutor_answered)
+        self.worker.failed.connect(lambda err: self.tutor_history.append(f"<p style='color: #ef4444;'>Error: {err}</p>"))
+        self.worker.start()
 
     def on_tutor_answered(self, answer: str):
         html_ans = markdown.markdown(answer)
-        block = f"<div style='background: #1e293b; border-left: 3px solid #3b82f6; padding: 8px; margin: 8px 0;'><b>AI Tutor:</b>{html_ans}</div>"
+        block = f"<div style='background: #1e293b; border-left: 3px solid #3b82f6; padding: 10px; margin: 8px 0; border-radius: 6px;'><b>NotebookLM Grounded Response:</b>{html_ans}</div>"
         self.tutor_history.append(block)
 
     # ------------------ EXPORT & SYNC ------------------
@@ -670,17 +844,15 @@ class LearningWindow(QMainWindow):
 
         full_content = f"{summary}\n\n{study_notes}\n\n## Transcript Snippet\n{transcript[:1500]}"
 
-        # 1. Save Study Note to local DB
         note_item = Item(
             item_type="note",
             title=title,
             content=full_content,
-            tags="meeting, learning, ai-summary",
+            tags="meeting, notebooklm, learning",
             is_pinned=True
         )
         self.storage.save_item(note_item, mark_dirty=True)
 
-        # 2. Save Action Items as tasks
         for t in self.current_learning_data.get("action_items", []):
             task_title = t.get("title", "")
             if task_title:
@@ -692,7 +864,6 @@ class LearningWindow(QMainWindow):
                 )
                 self.storage.save_item(task_item, mark_dirty=True)
 
-        # 3. Trigger immediate delta sync to sync with other machines
         self.status_label.setText("Syncing notes & tasks to your devices...")
         ok, msg = self.sync_engine.perform_sync()
 
@@ -701,7 +872,7 @@ class LearningWindow(QMainWindow):
                 self,
                 "Saved & Synchronized",
                 f"✓ Successfully saved '{title}' and synchronized with your CrossSync devices!\n\n"
-                f"You can view, search, and review these notes on both your Windows and Linux machines."
+                f"You can review these notes on both your Windows and Linux machines."
             )
             self.status_label.setText("✓ Notes & Tasks synchronized across devices.")
         else:
@@ -732,7 +903,7 @@ class LearningWindow(QMainWindow):
                     q = fc.get("question", "").replace("\t", " ").replace("\n", "<br>")
                     a = fc.get("answer", "").replace("\t", " ").replace("\n", "<br>")
                     f.write(f"{q}\t{a}\n")
-            QMessageBox.information(self, "Exported", f"Successfully exported {len(flashcards)} flashcards for Anki / Quizlet to:\n{file_path}")
+            QMessageBox.information(self, "Exported", f"Exported {len(flashcards)} flashcards for Anki to:\n{file_path}")
 
     def export_html_study_guide(self):
         if not self.current_learning_data:
@@ -748,10 +919,16 @@ class LearningWindow(QMainWindow):
             title = self.current_learning_data.get("title", "Study Guide")
             summary = self.current_learning_data.get("summary", "")
             notes = self.current_learning_data.get("study_notes", "")
+            podcast = self.current_learning_data.get("deep_dive_podcast", [])
             flashcards = self.current_learning_data.get("flashcards", [])
             quiz = self.current_learning_data.get("quiz", [])
 
             notes_html = markdown.markdown(f"## Summary\n{summary}\n\n{notes}")
+
+            podcast_html = "".join([
+                f"<div class='podcast-turn'><b>{t.get('speaker','')}:</b> {t.get('text','')}</div>"
+                for t in podcast
+            ])
 
             fc_html = "".join([
                 f"<div class='card'><b>Q:</b> {fc.get('question','')}<br><b>A:</b> {fc.get('answer','')}</div>"
@@ -774,6 +951,7 @@ class LearningWindow(QMainWindow):
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.6; max-width: 850px; margin: 40px auto; padding: 0 20px; color: #1e293b; }}
     h1 {{ color: #1e3a8a; border-bottom: 2px solid #3b82f6; padding-bottom: 8px; }}
     h2 {{ color: #2563eb; margin-top: 24px; }}
+    .podcast-turn {{ background: #f8fafc; border-left: 3px solid #6366f1; padding: 8px 12px; margin-bottom: 8px; }}
     .card {{ background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 12px; margin-bottom: 10px; }}
     .quiz-q {{ background: #f1f5f9; border-radius: 8px; padding: 14px; margin-bottom: 14px; }}
     .ans {{ color: #047857; margin-top: 8px; font-size: 13px; }}
@@ -782,6 +960,8 @@ class LearningWindow(QMainWindow):
 <body>
     <h1>{title}</h1>
     {notes_html}
+    <h2>NotebookLM Two-Host Deep Dive Conversation</h2>
+    {podcast_html}
     <h2>Flashcards & Active Recall</h2>
     {fc_html}
     <h2>Knowledge Check Quiz & Solutions</h2>
@@ -790,7 +970,7 @@ class LearningWindow(QMainWindow):
 </html>"""
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(full_html)
-            QMessageBox.information(self, "Exported", f"Successfully exported printable study guide to:\n{file_path}")
+            QMessageBox.information(self, "Exported", f"Exported printable study guide to:\n{file_path}")
 
     def export_markdown(self):
         if not self.current_learning_data:
@@ -814,21 +994,33 @@ class LearningWindow(QMainWindow):
         from PyQt6.QtWidgets import QDialog, QFormLayout
         diag = QDialog(self)
         diag.setWindowTitle("AI & Gemini Settings")
-        diag.setMinimumWidth(450)
+        diag.setMinimumWidth(480)
         d_layout = QVBoxLayout(diag)
         
-        info = QLabel("Enter your Google Gemini API Key to enable automatic speech recognition and AI note generation:")
+        info = QLabel(
+            "<b>Connect AI for Live Summarization & NotebookLM</b><br>"
+            "Get your free Google Gemini API key at: <a href='https://aistudio.google.com'>aistudio.google.com</a>"
+        )
+        info.setOpenExternalLinks(True)
         info.setWordWrap(True)
         d_layout.addWidget(info)
 
         key_edit = QLineEdit(self.settings.get("gemini_api_key", os.environ.get("GEMINI_API_KEY", "")))
+        key_edit.setPlaceholderText("Paste your Gemini API key (starts with AIza...)")
         key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         d_layout.addWidget(key_edit)
+
+        # Optional OpenAI Key
+        d_layout.addWidget(QLabel("Optional OpenAI API Key (or leave blank):"))
+        openai_edit = QLineEdit(self.settings.get("openai_api_key", os.environ.get("OPENAI_API_KEY", "")))
+        openai_edit.setPlaceholderText("sk-...")
+        openai_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        d_layout.addWidget(openai_edit)
 
         btn_row = QHBoxLayout()
         cancel_b = QPushButton("Cancel")
         cancel_b.clicked.connect(diag.reject)
-        save_b = QPushButton("Save Key")
+        save_b = QPushButton("Save Keys")
         save_b.setProperty("class", "primaryBtn")
         save_b.clicked.connect(diag.accept)
         btn_row.addWidget(cancel_b)
@@ -837,7 +1029,11 @@ class LearningWindow(QMainWindow):
 
         if diag.exec():
             new_key = key_edit.text().strip()
+            new_openai = openai_edit.text().strip()
             self.settings["gemini_api_key"] = new_key
+            self.settings["openai_api_key"] = new_openai
             save_settings(self.settings)
             self.processor.gemini_api_key = new_key
-            QMessageBox.information(self, "Saved", "Gemini API Key updated successfully!")
+            self.processor.openai_api_key = new_openai
+            self.update_ai_banner()
+            QMessageBox.information(self, "Saved", "AI API Keys updated successfully!")

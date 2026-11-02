@@ -143,13 +143,17 @@ class AudioRecorder:
         self._audio_queue.put(data_copy)
         self._recorded_frames.append(data_copy)
 
-        # Calculate RMS level for visual VU meter (0.0 to 1.0)
+        # Calculate RMS level for visual VU meter & waveform visualizer
         if self.on_level_update:
             try:
                 float_data = data_copy.astype(np.float32) / 32768.0
                 rms = np.sqrt(np.mean(float_data ** 2)) if len(float_data) > 0 else 0.0
                 level = min(1.0, float(rms * 8.0))
-                self.on_level_update(level)
+                # Pass both level and raw chunk to the visualizer
+                try:
+                    self.on_level_update(level, data_copy)
+                except TypeError:
+                    self.on_level_update(level)
             except Exception:
                 pass
 
