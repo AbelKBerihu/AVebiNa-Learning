@@ -93,14 +93,28 @@ class AudioRecorder:
 
             try:
                 # Primary stream (e.g. System Loopback or Default Mic)
-                self._stream = sd.InputStream(
-                    samplerate=self.sample_rate,
-                    channels=self.channels,
-                    dtype="int16",
-                    device=device_id,
-                    callback=self._audio_callback_primary
-                )
-                self._stream.start()
+                try:
+                    self._stream = sd.InputStream(
+                        samplerate=self.sample_rate,
+                        channels=self.channels,
+                        dtype="int16",
+                        device=device_id,
+                        callback=self._audio_callback_primary
+                    )
+                    self._stream.start()
+                except Exception as primary_err:
+                    # If specific ALSA/WASAPI device failed to open, fall back to default audio server
+                    if device_id is not None:
+                        self._stream = sd.InputStream(
+                            samplerate=self.sample_rate,
+                            channels=self.channels,
+                            dtype="int16",
+                            device=None,
+                            callback=self._audio_callback_primary
+                        )
+                        self._stream.start()
+                    else:
+                        raise primary_err
 
                 # Secondary stream (optional mixed mic)
                 if secondary_device_id is not None and secondary_device_id != device_id:
@@ -113,8 +127,7 @@ class AudioRecorder:
                             callback=self._audio_callback_secondary
                         )
                         self._stream_secondary.start()
-                    except Exception as err:
-                        print(f"Warning: Could not open secondary mixed stream: {err}")
+                    except Exception:
                         self._stream_secondary = None
 
                 return True

@@ -5,9 +5,9 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 cd "$DIR"
 
 echo "=========================================================="
-echo " ✦ CrossSync & LearnEcho Master Launcher"
+echo " ✦ AVebiNa Learning & CrossSync Master Launcher"
 echo "=========================================================="
-echo " 1) LearnEcho (Live Meeting & Lecture AI Study Companion)"
+echo " 1) AVebiNa Learning (Live Meeting/Lecture AI Companion & NotebookLM)"
 echo " 2) CrossSync (Desktop Notes & Tasks App)"
 echo " 3) Sync Server (Start Cloud / LAN Synchronization Server)"
 echo " 4) Headless CLI (Terminal Note & Task Manager)"
@@ -20,7 +20,7 @@ choice=${choice:-1}
 
 case "$choice" in
     1)
-        echo "Launching LearnEcho..."
+        echo "Launching AVebiNa Learning..."
         python3 run_learner.py
         ;;
     2)

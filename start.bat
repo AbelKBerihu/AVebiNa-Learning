@@ -2,9 +2,9 @@
 cd /d "%~dp0"
 cls
 echo ==========================================================
-echo  CrossSync and LearnEcho Master Launcher (Windows)
+echo  AVebiNa Learning and CrossSync Master Launcher (Windows)
 echo ==========================================================
-echo  1. LearnEcho (Live Meeting and Lecture AI Study Companion)
+echo  1. AVebiNa Learning (Live Meeting/Lecture AI Companion)
 echo  2. CrossSync (Desktop Notes and Tasks App)
 echo  3. Sync Server (Start Cloud / LAN Synchronization Server)
 echo  4. Headless CLI (Terminal Note and Task Manager)
@@ -15,7 +15,7 @@ set /p choice="Select option [1-6] (Default: 1): "
 if "%choice%"=="" set choice=1
 
 if "%choice%"=="1" (
-    echo Launching LearnEcho...
+    echo Launching AVebiNa Learning...
     python run_learner.py
     goto end
 )

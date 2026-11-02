@@ -19,6 +19,7 @@ app = QApplication.instance() or QApplication(["-platform", "offscreen"])
 
 class TestNotebookLMFeatures(unittest.TestCase):
     def test_waveform_widget_states(self):
+        import numpy as np
         w = WaveformWidget()
         self.assertFalse(w.is_recording)
 
@@ -26,9 +27,13 @@ class TestNotebookLMFeatures(unittest.TestCase):
         w.set_recording_state(True)
         self.assertTrue(w.is_recording)
 
-        # Update audio data
-        w.update_audio_data(0.75)
+        # Update audio data with 2D stereo chunk
+        chunk_2d = (np.random.randn(1024, 2) * 5000).astype(np.int16)
+        w.update_audio_data(0.75, chunk_2d)
         self.assertEqual(w.level, 0.75)
+
+        # Test paintEvent execution
+        w.repaint()
 
         w.set_recording_state(False)
         self.assertFalse(w.is_recording)
